@@ -54,7 +54,7 @@ jobs:
           # same way. Do not put real values directly in this file.
         run: |
           mkdir -p state
-          python gld_spy_credit_spread_alert_bot_v11_3.py
+          python tradebot.py
 
       - name: Commit updated state
         run: |
