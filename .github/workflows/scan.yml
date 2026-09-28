@@ -1,0 +1,69 @@
+name: Credit Spread Scan
+
+on:
+  schedule:
+    # Every 5 minutes during pre-market through regular-session close (13:00-21:00 UTC
+    # covers roughly 5am-1pm Pacific across DST drift) -- this is when new entries get
+    # found, so it needs to be responsive.
+    - cron: "*/5 13-21 * * 1-5"
+    # Every 15 minutes the rest of the time (overnight monitoring only -- checking
+    # futures/extended-hours drift on already-tracked ideas doesn't need 5-minute
+    # resolution, and this keeps Actions-minutes usage sane).
+    - cron: "*/15 0-12,22-23 * * 1-6"
+  workflow_dispatch: {}  # manual trigger from the Actions tab
+
+# Only one run at a time: run_one_scan reads seen_alerts.json / overnight_tracked_ideas.json,
+# mutates them, and this job commits them back. Two overlapping runs would race on that
+# commit and could silently drop an update, so later scheduled runs wait instead of
+# running concurrently.
+concurrency:
+  group: credit-spread-scan
+  cancel-in-progress: false
+
+permissions:
+  contents: write  # needed to commit the updated state files back to the repo
+
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Always start from the latest committed state, even if another run's
+          # commit landed between this job being queued and starting.
+          fetch-depth: 1
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run one scan / monitor pass
+        env:
+          RUN_ONCE: "true"
+          SYMBOLS: "GLD,SPY"
+          TRACK_STATE_FILE: "state/overnight_tracked_ideas.json"
+          SEEN_ALERTS_STATE_FILE: "state/seen_alerts.json"
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+          ALPHA_VANTAGE_API_KEY: ${{ secrets.ALPHA_VANTAGE_API_KEY }}
+          # Add any other var from your .env as a repo secret (Settings > Secrets and
+          # variables > Actions > New repository secret), then reference it here the
+          # same way. Do not put real values directly in this file.
+        run: |
+          mkdir -p state
+          python gld_spy_credit_spread_alert_bot_v11_3.py
+
+      - name: Commit updated state
+        run: |
+          git config user.name "credit-spread-bot"
+          git config user.email "actions@users.noreply.github.com"
+          git add state/overnight_tracked_ideas.json state/seen_alerts.json 2>/dev/null || true
+          if ! git diff --cached --quiet; then
+            git commit -m "state: update tracker/dedupe [skip ci]"
+            git push
+          else
+            echo "No state changes to commit."
+          fi
